@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 _FENCE_RE = re.compile(r'^(`{3,})\s*latex\s+\{([^}]*)\}\s*$', re.MULTILINE)
 _ATTR_TAG = '% _latex_render_attrs:'
+_CMD_TAG = '% _latex_render_cmd'
 _CARRIED_KEYS = ('latex_zoom', 'latex_width', 'latex_height', 'latex_engine')
 _UNIT_RE = re.compile(r'^([\d.]+)\s*(pt|px|em|cm|mm|in)?$')
 _PX_FACTORS = {'px': 1, 'pt': 96 / 72, 'in': 96, 'cm': 96 / 2.54,
@@ -57,8 +58,8 @@ _PX_FACTORS = {'px': 1, 'pt': 96 / 72, 'in': 96, 'cm': 96 / 2.54,
 
 
 def _parse_kv(text):
-    """Parse 'k1=v1 k2=v2 ...' into a dict."""
-    return dict(p.split('=', 1) for p in text.split() if '=' in p)
+    """Parse 'k1=v1 k2=v2 ...' into a dict (keys lowercased)."""
+    return {k.lower(): v.strip(',;') for p in text.replace(',', ' ').replace(';', ' ').split() if '=' in p for k, v in [p.split('=', 1)]}
 
 
 def _to_px(val):
@@ -81,12 +82,18 @@ def _on_source_read(app, docname, source):
 
     def _inject(match):
         backticks, attr_str = match.group(1), match.group(2)
-        carried = {k: v for k, v in _parse_kv(attr_str).items()
-                   if k in _CARRIED_KEYS}
-        if not carried:
+        kv = _parse_kv(attr_str)
+
+        # Only compile when cmd=true (case-insensitive) is present
+        if kv.get('cmd', '').lower() != 'true':
             return f'{backticks}latex'
-        tag = ' '.join(f'{k}={v}' for k, v in carried.items())
-        return f'{backticks}latex\n{_ATTR_TAG} {tag}'
+
+        carried = {k: v for k, v in kv.items() if k in _CARRIED_KEYS}
+        parts = [f'{backticks}latex', _CMD_TAG]
+        if carried:
+            tag = ' '.join(f'{k}={v}' for k, v in carried.items())
+            parts.append(f'{_ATTR_TAG} {tag}')
+        return '\n'.join(parts)
 
     source[0] = _FENCE_RE.sub(_inject, source[0])
 
@@ -94,12 +101,15 @@ def _on_source_read(app, docname, source):
 def _extract_attrs(tex_body):
     """Extract and strip injected attribute comments from code body."""
     attrs, clean = {}, []
+    has_cmd = False
     for line in tex_body.split('\n'):
-        if line.startswith(_ATTR_TAG):
+        if line.strip() == _CMD_TAG:
+            has_cmd = True
+        elif line.startswith(_ATTR_TAG):
             attrs.update(_parse_kv(line[len(_ATTR_TAG):]))
         else:
             clean.append(line)
-    return '\n'.join(clean), attrs
+    return '\n'.join(clean), attrs, has_cmd
 
 
 class LaTeXCodeBlockTransform(SphinxPostTransform):
@@ -111,7 +121,9 @@ class LaTeXCodeBlockTransform(SphinxPostTransform):
         for node in self.document.findall(nodes.literal_block):
             if node.get('language') != 'latex':
                 continue
-            tex_body, attrs = _extract_attrs(node.astext())
+            tex_body, attrs, has_cmd = _extract_attrs(node.astext())
+            if not has_cmd:
+                continue
             if '\\begin{' not in tex_body and '\\draw' not in tex_body:
                 continue
             try:
@@ -220,6 +232,6 @@ def setup(app):
     app.add_config_value('latex_render_preamble', '', 'env')
     app.connect('source-read', _on_source_read)
     app.add_post_transform(LaTeXCodeBlockTransform)
-    return {'version': '0.1.0',
+    return {'version': '0.2.0',
             'parallel_read_safe': True,
             'parallel_write_safe': True}
